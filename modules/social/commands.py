@@ -1,0 +1,2577 @@
+from __future__ import annotations
+
+import os
+import io
+import re
+import random
+import unicodedata
+import base64
+import hashlib
+import asyncio
+import html as html_lib
+from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
+
+try:
+    from deep_translator import GoogleTranslator
+except ImportError:
+    GoogleTranslator = None
+import sympy
+try:
+    import html2image
+    _hti = html2image.Html2Image(
+        custom_flags=[
+            '--no-sandbox',
+            '--disable-gpu',
+            '--default-background-color=00000000',
+            '--hide-scrollbars',
+            '--force-device-scale-factor=3.0',
+        ]
+    )
+    _hti.output_path = '/tmp'
+except Exception:
+    _hti = None
+    html2image = None
+from telegram import (
+    Update,
+    User,
+    ChatMemberAdministrator,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputSticker,
+)
+from telegram.ext import ContextTypes
+
+from modules.social.ping import ping_cmd
+from modules.ai.translator import ai_translate
+from modules.utils.storage import (
+    get_user,
+    update_user,
+    add_xp,
+    get_group,
+    update_group,
+    get_all_users,
+)
+
+
+def _cs(cmd, desc=""):
+    return f"⏳ <b>/{cmd}</b> — ᴄᴏᴍɪɴɢ ꜱᴏᴏɴ!\n<i>{desc}</i>"
+
+
+def _reply_user(update: Update) -> Optional[User]:
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        return update.message.reply_to_message.from_user
+    return None
+
+
+async def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        return False
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        return any(m.user.id == user_id for m in admins)
+    except Exception:
+        return False
+
+
+SOCIAL_ACTIONS = {
+    "crush": ("💘", "{a} ʜᴀꜱ ᴀ ᴄʀᴜꜱʜ ᴏɴ {t}! 💕"),
+    "love": ("❤️", "{a} ꜱᴇɴᴛ ʟᴏᴠᴇ ᴛᴏ {t}! ❤️‍🔥"),
+    "look": ("👀", "{a} ɪꜱ ʟᴏᴏᴋɪɴɢ ᴀᴛ {t}..."),
+    "brain": ("🧠", "{a} ɢᴀᴠᴇ {t} ᴀ ʙʀᴀɪɴʏ ᴠɪʙᴇ ᴄʜᴇᴄᴋ (+5 XP!)"),
+    "murder": ("🔪", "{a} ᴍᴜʀᴅᴇʀᴇᴅ {t} ɪɴ ᴄᴏʟᴅ ʙʟᴏᴏᴅ! 💀"),
+    "slap": ("🖐️", "{a} ꜱʟᴀᴘᴘᴇᴅ {t} ʜᴀʀᴅ! 🫢"),
+    "punch": ("👊", "{a} ᴘᴜɴᴄʜᴇᴅ {t}! 💢"),
+    "bite": ("🦷", "{a} ʙɪᴛ {t}! 😬"),
+    "kiss": ("💋", "{a} ᴋɪꜱꜱᴇᴅ {t}! 💞"),
+    "hug": ("🤗", "{a} ɢᴀᴠᴇ {t} ᴀ ʙɪɢ ʜᴜɢ! 🌸"),
+}
+
+
+def _make_social_handler(action_key: str):
+    emoji, template = SOCIAL_ACTIONS[action_key]
+
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        author = update.effective_user
+        target = _reply_user(update)
+        if not target or target.id == author.id:
+            await update.message.reply_text(f"{emoji} ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜꜱᴇʀ ᴛᴏ ᴜꜱᴇ /{action_key}!")
+            return
+        a_name = author.first_name or author.username or "Someone"
+        t_name = target.first_name or target.username or "Someone"
+        await update.message.reply_text(f"{emoji} {template.format(a=a_name, t=t_name)}")
+        if action_key in ("crush", "love", "kiss", "hug"):
+            get_user(author.id, author.username or a_name, author.first_name)
+            add_xp(author.id, 3)
+
+    return handler
+
+
+async def cmd_hug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} Sᴇɴᴛ A Hᴜɢ Tᴏ {t_mention} 🤗"
+    photo_url = "https://cdn.imageurlgenerator.com/uploads/856e0adb-1891-441e-ae03-1987d6befbf6.jpg"
+    try:
+        await update.message.reply_photo(
+            photo=photo_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_punch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} punched {t_mention} really hard 👊"
+    gif_url = "https://cdn.imageurlgenerator.com/uploads/ea21c85b-ef61-4bb7-9e5e-7a4fd56a31a4.gif"
+    try:
+        await update.message.reply_animation(
+            animation=gif_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_bite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} Gᴀᴠᴇ A  Nᴏᴛᴛʏ Bɪᴛᴇ ᴛᴏ {t_mention} 😁"
+    gif_url = "https://cdn.imageurlgenerator.com/uploads/a9bdb1fc-478d-4cb8-b6c9-8f1035f8a30c.gif"
+    try:
+        await update.message.reply_animation(
+            animation=gif_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_slap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} slapped {t_mention} 👋"
+    gif_url = "https://cdn.imageurlgenerator.com/uploads/f465dd78-b150-4a69-ac18-5c3dfd8f9553.gif"
+    try:
+        await update.message.reply_animation(
+            animation=gif_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_murder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("🔪 Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ Tᴏ Mᴜʀᴅᴇʀ Tʜᴇᴍ!")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} Bʀᴜᴛᴀʟʟʏ Mᴜʀᴅᴇʀᴇᴅ {t_mention} 🔪🩸"
+    gif_url = "https://cdn.imageurlgenerator.com/uploads/95137995-12aa-45fa-9493-5c41f4cff986.gif"
+    try:
+        await update.message.reply_animation(
+            animation=gif_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_crush(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    pct = random.randint(30, 100)
+    add_xp(author.id, 3)
+
+    msg = (
+        f"💘 {t_mention}'ꜱ Sᴇᴄʀᴇᴛ Cʀᴜꜱʜ Iꜱ {a_mention}\n"
+        f"Crush level: {pct}% ❤️"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_brain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    pct = random.randint(5, 100)
+    emoji = "😎" if pct >= 60 else ("🧠" if pct >= 30 else "🤪")
+
+    msg = f"IQ Lᴇᴠᴇʟ Oꜰ {t_mention} Iꜱ {pct}% {emoji}"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_kiss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    add_xp(author.id, 3)
+
+    msg = f"{a_mention} Gᴀᴠᴇ A Sᴡᴇᴇᴛ Kɪꜱꜱ Tᴏ {t_mention} 😘💋"
+    gif_url = "https://www.image2url.com/r2/default/gifs/1787438796218-88146e12-1516-4f03-a50f-d06fa5160b09.gif"
+    try:
+        await update.message.reply_animation(
+            animation=gif_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_love(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+    
+    author = update.effective_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+    
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or author.username or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+    
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+    
+    pct = random.randint(10, 100)
+    
+    msg = (
+        "❤️ Lᴏᴠᴇ Mᴇᴛᴇʀ Rᴇᴘᴏʀᴛ ❤️\n"
+        f"{a_mention} ❤️ {t_mention}\n"
+        f"Lᴏᴠᴇ Cᴏᴍᴘᴀᴛɪʙɪʟɪᴛʏ: {pct}% ❤️"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    ud = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+    t_name = ud.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+    
+    pct = random.randint(35, 100)
+    emoji = "😍" if pct >= 60 else ("✨" if pct >= 50 else "😉")
+    
+    mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+    msg = f"{mention}'S Lᴏᴏᴋ Rᴀᴛɪɴɢ Iꜱ: {pct}% {emoji}"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def stupid_meter(update, context):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("Rᴇᴘʟʏ Tᴏ Sᴏᴍᴇᴏɴᴇ.")
+        return
+
+    ud = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+    t_name = ud.get("display_name") or getattr(target, "full_name", None) or target.first_name or target.username or "User"
+    mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+    pct = random.randint(10, 100)
+
+    msg = (
+        "Sᴛᴜᴘɪᴅ Mᴇᴛᴇʀ Sᴄᴀɴɴɪɴɢ… 🔍\n"
+        f"Rᴇꜱᴜʟᴛ Fᴏʀ {mention}: {pct}% 😵💫 Sᴛᴜᴘɪᴅ Dᴇᴛᴇᴄᴛᴇᴅ"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+COUPLE_COOLDOWNS: Dict[int, datetime] = {}
+GROUP_ACTIVE_MEMBERS: Dict[int, Dict[int, str]] = {}
+
+
+async def couples(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("💞 This command works best in groups!")
+        return
+
+    now = datetime.now()
+    last_time = COUPLE_COOLDOWNS.get(chat.id)
+    if last_time and (now - last_time) < timedelta(minutes=5):
+        await update.message.reply_text(
+            "⏳ A Cᴏᴜᴘʟᴇ Hᴀꜱ Bᴇᴇɴ Dᴇᴄʟᴀʀᴇᴅ Rᴇᴄᴇɴᴛʟʏ.\n"
+            "⏰ Tʀʏ Aꜰᴛᴇʀ 5 Mɪɴꜱ"
+        )
+        return
+
+    author = update.effective_user
+    replied = _reply_user(update)
+
+    from modules.utils.storage import get_all_users, get_group, get_user
+    all_users = get_all_users()
+    grp_settings = get_group(chat.id)
+
+    # Build a comprehensive candidate pool for the group
+    pool: Dict[int, str] = {}
+
+    # 1. Add current author
+    a_name = getattr(author, "full_name", None) or author.first_name or "User"
+    pool[author.id] = a_name
+
+    # 2. Add replied user if present
+    r_name = "User"
+    if replied and replied.id != author.id:
+        r_name = getattr(replied, "full_name", None) or replied.first_name or "User"
+        pool[replied.id] = r_name
+
+    # 3. Add members tracked in group settings
+    grp_members = grp_settings.get("members") or []
+    for mid in grp_members:
+        if mid not in pool:
+            ud = all_users.get(str(mid)) or get_user(mid)
+            m_name = ud.get("display_name") or ud.get("username") or "User"
+            pool[mid] = m_name
+
+    # 4. Fetch group administrators dynamically from Telegram
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        for admin in admins:
+            if admin.user and not admin.user.is_bot:
+                adm_id = admin.user.id
+                if adm_id not in pool:
+                    adm_name = getattr(admin.user, "full_name", None) or admin.user.first_name or "User"
+                    pool[adm_id] = adm_name
+    except Exception:
+        pass
+
+    # 5. Fallback to all stored active users in DB if pool is still small
+    if len(pool) < 2:
+        for uid_str, udata in all_users.items():
+            try:
+                uid_int = int(uid_str)
+                if uid_int not in pool and uid_int > 0:
+                    u_name = udata.get("display_name") or udata.get("username") or "User"
+                    pool[uid_int] = u_name
+            except Exception:
+                pass
+
+    if replied and replied.id != author.id:
+        u1_id, u1_name = author.id, pool.get(author.id, a_name)
+        u2_id, u2_name = replied.id, pool.get(replied.id, r_name)
+    else:
+        if len(pool) >= 2:
+            chosen = random.sample(list(pool.keys()), 2)
+            u1_id, u2_id = chosen[0], chosen[1]
+            u1_name, u2_name = pool[u1_id], pool[u2_id]
+        else:
+            u1_id, u1_name = author.id, a_name
+            u2_id, u2_name = author.id, a_name
+
+    COUPLE_COOLDOWNS[chat.id] = now
+
+    m1 = f'<a href="tg://user?id={u1_id}">{html_lib.escape(u1_name)}</a>'
+    m2 = f'<a href="tg://user?id={u2_id}">{html_lib.escape(u2_name)}</a>'
+
+    msg = (
+        "❤️ <b>Tᴏᴅᴀʏꜱ Cᴜᴛᴇ Cᴏᴜᴘʟᴇ</b> ❤️\n\n"
+        f"{m1} 💞 {m2}\n\n"
+        "Lᴏᴠᴇ Iꜱ Iɴ Tʜᴇ Aɪʀ ❤️\n\n"
+        "~ Fʀᴏᴍ ʀᴀᴅʜᴀ Wɪᴛʜ Lᴏᴠᴇ 💋"
+    )
+    photo_url = "https://i.ibb.co/KcTmzLDJ/When-Two-Hearts-Talk-The-World-Goes-Quiet.jpg"
+    try:
+        await update.message.reply_photo(
+            photo=photo_url,
+            caption=msg,
+            parse_mode="HTML",
+        )
+    except Exception:
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+
+def _friends_for(user_id: int) -> Dict[str, List[int]]:
+    ud = get_user(user_id)
+    friends = ud.get("friends") or {}
+    if not isinstance(friends, dict):
+        friends = {}
+    return {str(k): (v if isinstance(v, list) else []) for k, v in friends.items()}
+
+
+def _save_friends(user_id: int, friends: Dict[str, List[int]]):
+    update_user(user_id, friends={k: list(v) for k, v in friends.items()})
+
+
+def _friend_name(friend_id: int) -> str:
+    from modules.utils.storage import get_all_users
+    data = get_all_users()
+    info = data.get(str(friend_id)) or {}
+    return (
+        info.get("display_name")
+        or info.get("username")
+        or f"User {friend_id}"
+    )
+
+
+async def friends(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "🧸 <b>Fʀɪᴇɴᴅꜱʜɪᴘ Cᴏᴍᴍᴀɴᴅꜱ</b>\n\n"
+        "• <code>/addf &lt;tag_name&gt;</code> - Add friend (in reply)\n"
+        "• <code>/tag &lt;tag/all&gt;</code> - Tag your friend\n"
+        "• <code>/t &lt;tag/all&gt;</code> - Tag your friend\n"
+        "• <code>/ctag &lt;old&gt; &lt;new&gt;</code> - Change tag of your friend\n"
+        "• <code>/delf &lt;tag&gt;</code> - Delete a friend\n"
+        "• <code>/allf</code> - All friend's list\n"
+        "• <code>/friend</code> - Show friends count\n"
+        "• <code>/friends</code> - Show all friendship commands\n\n"
+        "<b>💡 Benefits:</b>\n"
+        "Now you can easily tag your friends in any group by typing <code>/tag jinu</code> - this will tag your friend in that particular group!"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def addf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    target = _reply_user(update)
+    args = context.args or []
+    tag = (args[0].strip() if args else "").lstrip("#").lower()
+    if not target or target.id == user.id:
+        await update.message.reply_text("📌 Rᴇᴘʟʏ Tᴏ A Uꜱᴇʀ Tᴏ Aᴅᴅ A Fʀɪᴇɴᴅ: /addf <tag>")
+        return
+    if not tag:
+        await update.message.reply_text("📌 Pʀᴏᴠɪᴅᴇ A Tᴀɢ: /addf <tag> (e.g. /addf bestie)")
+        return
+    get_user(user.id, user.username or user.first_name or "User", user.first_name)
+    get_user(
+        target.id,
+        getattr(target, "username", None) or (target.first_name or "User"),
+        target.first_name,
+    )
+    friends = _friends_for(user.id)
+    friends.setdefault(tag, [])
+    if target.id in friends[tag]:
+        await update.message.reply_text(
+            f"📌 {target.first_name or target.username or 'User'} is already in #{tag}."
+        )
+        return
+    friends[tag].append(target.id)
+    _save_friends(user.id, friends)
+    await update.message.reply_text(
+        f"✅ Added <b>{target.first_name or target.username or 'User'}</b> to your #{tag} friends!",
+        parse_mode="HTML",
+    )
+
+
+async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("❗️ Usᴀɢᴇ: /tag <tag_name|all> [message]")
+        return
+    tag_arg = (args[0].strip() if args else "").lstrip("#").lower()
+    if not tag_arg:
+        await update.message.reply_text("❗️ Usᴀɢᴇ: /tag <tag_name|all> [message]")
+        return
+    friends = _friends_for(user.id)
+    ids: List[int] = []
+    if tag_arg == "all":
+        for ids_list in friends.values():
+            for fid in ids_list:
+                if fid not in ids:
+                    ids.append(fid)
+        if not ids:
+            await update.message.reply_text("❗️ Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ғʀɪᴇɴᴅs ʏᴇᴛ.")
+            return
+    elif tag_arg in friends:
+        ids = list(friends[tag_arg])
+    else:
+        await update.message.reply_text(f"📌 You have no friends tagged #{tag_arg}.")
+        return
+    if not ids:
+        await update.message.reply_text("❗️ Yᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ғʀɪᴇɴᴅs ʏᴇᴛ.")
+        return
+    mention_limit = 20
+    chunks = [ids[i:i+mention_limit] for i in range(0, len(ids), mention_limit)]
+    for chunk in chunks:
+        parts = []
+        for fid in chunk:
+            name = _friend_name(fid)
+            parts.append(f"[{name}](tg://user?id={fid})")
+        header = f"📢 Tagging {'#all' if tag_arg == 'all' else '#'+tag_arg} ({len(chunk)}):"
+        await update.message.reply_text(
+            header + "\n" + " • ".join(parts),
+            parse_mode="Markdown",
+        )
+
+
+async def ctag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text("📌 USAGE: /ctag <old_tag> <new_tag>")
+        return
+    old_tag = args[0].strip().lstrip("#").lower()
+    new_tag = args[1].strip().lstrip("#").lower()
+    if not old_tag or not new_tag:
+        await update.message.reply_text("📌 USAGE: /ctag <old_tag> <new_tag>")
+        return
+    friends = _friends_for(user.id)
+    if old_tag not in friends:
+        await update.message.reply_text(f"📌 Tag #{old_tag} doesn't exist.")
+        return
+    if old_tag == new_tag:
+        await update.message.reply_text("📌 Old and new tag are the same.")
+        return
+    old_ids = list(friends[old_tag])
+    if new_tag in friends:
+        for fid in old_ids:
+            if fid not in friends[new_tag]:
+                friends[new_tag].append(fid)
+    else:
+        friends[new_tag] = list(old_ids)
+    del friends[old_tag]
+    _save_friends(user.id, friends)
+    await update.message.reply_text(
+        f"✅ Renamed #{old_tag} → #{new_tag} ({len(old_ids)} friends moved)."
+    )
+
+
+async def delf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    arg = (args[0].strip() if args else "").lstrip("#").lower()
+    if not arg:
+        await update.message.reply_text("📌 USAGE: /delf <tag> (reply to remove that user) OR /delf all")
+        return
+    friends = _friends_for(user.id)
+    target = _reply_user(update)
+    if arg == "all":
+        total = sum(len(v) for v in friends.values())
+        _save_friends(user.id, {})
+        await update.message.reply_text(f"✅ Deleted all {total} friend entries.")
+        return
+    if arg not in friends:
+        await update.message.reply_text(f"📌 Tag #{arg} doesn't exist.")
+        return
+    if target:
+        if target.id not in friends[arg]:
+            await update.message.reply_text(
+                f"📌 {target.first_name or target.username or 'User'} is not in #{arg}."
+            )
+            return
+        friends[arg] = [fid for fid in friends[arg] if fid != target.id]
+        if not friends[arg]:
+            del friends[arg]
+        _save_friends(user.id, friends)
+        await update.message.reply_text(
+            f"✅ Removed <b>{target.first_name or target.username or 'User'}</b> from #{arg}.",
+            parse_mode="HTML",
+        )
+        return
+    removed_count = len(friends[arg])
+    del friends[arg]
+    _save_friends(user.id, friends)
+    await update.message.reply_text(f"✅ Deleted tag #{arg} ({removed_count} friends removed).")
+
+
+async def allf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    friends = _friends_for(user.id)
+    if not friends:
+        await update.message.reply_text(
+            "👥 You have no friends yet. Reply to someone: <code>/addf bestie</code>",
+            parse_mode="HTML",
+        )
+        return
+    total = sum(len(v) for v in friends.values())
+    lines = [f"👥 <b>Your Friends</b>  (total {total})\n"]
+    for tag, ids in friends.items():
+        names = ", ".join(_friend_name(fid) for fid in ids) or "(empty)"
+        lines.append(f"  #{tag} ({len(ids)}): {names}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def friend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    friends = _friends_for(user.id)
+    total = sum(len(v) for v in friends.values())
+    uniq = {fid for ids in friends.values() for fid in ids}
+    await update.message.reply_text(
+        f"👥 You have <b>{len(uniq)}</b> unique friend(s) across <b>{len(friends)}</b> tag(s) (total entries: {total}).",
+        parse_mode="HTML",
+    )
+
+
+GIFT_CATALOG: Dict[str, Dict[str, Any]] = {
+    "rose": {"name": "🌹 Rᴏꜱᴇ", "price": 500},
+    "chocolate": {"name": "🍫 Cʜᴏᴄᴏʟᴀᴛᴇ", "price": 800},
+    "ring": {"name": "💍 Ring", "price": 2000},
+    "teddy": {"name": "🧸 Tᴇᴅᴅʏ Bᴇᴀʀ", "price": 1500},
+    "teddy bear": {"name": "🧸 Tᴇᴅᴅʏ Bᴇᴀʀ", "price": 1500},
+    "pizza": {"name": "🍕 Pizza", "price": 600},
+    "surprise box": {"name": "🎁 Sᴜʀᴘʀɪꜱᴇ Bᴏx", "price": 2500},
+    "box": {"name": "🎁 Sᴜʀᴘʀɪꜱᴇ Bᴏx", "price": 2500},
+    "puppy": {"name": "🐶 Puppy", "price": 3000},
+    "cake": {"name": "🎂 Cake", "price": 1000},
+    "love letter": {"name": "💌 Lᴏᴠᴇ Lᴇᴛᴛᴇʀ", "price": 400},
+    "letter": {"name": "💌 Lᴏᴠᴇ Lᴇᴛᴛᴇʀ", "price": 400},
+    "cat": {"name": "🐱 Cᴀᴛ", "price": 2500},
+    "tulip": {"name": "🌷 Tᴜʟɪᴘ", "price": 1500},
+    "girl friend": {"name": "👠 Gɪʀʟ Fʀɪᴇɴᴅ", "price": 1000},
+    "girlfriend": {"name": "👠 Gɪʀʟ Fʀɪᴇɴᴅ", "price": 1000},
+    "boy friend": {"name": "👦 Bᴏʏ Fʀɪᴇɴᴅ", "price": 1000},
+    "boyfriend": {"name": "👦 Bᴏʏ Fʀɪᴇɴᴅ", "price": 1000},
+    "bmw": {"name": "🏎 Bᴍᴡ", "price": 5000},
+    "car": {"name": "🏎 Bᴍᴡ", "price": 5000},
+}
+
+
+async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target = _reply_user(update)
+    if not target:
+        await update.message.reply_text("⚠️ Rᴇᴘʟʏ Tᴏ Tʜᴇ Uꜱᴇʀ Yᴏᴜ Wᴀɴᴛ Tᴏ Gɪꜰᴛ.")
+        return
+
+    author = update.effective_user
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("🎁 Uꜱᴀɢᴇ: /gift <ɪᴛᴇᴍ_ɴᴀᴍᴇ>")
+        return
+
+    raw_item = " ".join(args).strip().lower()
+    gift_info = GIFT_CATALOG.get(raw_item)
+    if gift_info:
+        item_name = gift_info["name"]
+        price = gift_info["price"]
+    else:
+        item_name = f"🎁 {' '.join(args).strip()}"
+        price = 500
+
+    from modules.utils.storage import get_user, update_user
+    ud_a = get_user(author.id, getattr(author, "username", "User"), getattr(author, "first_name", "User"))
+    ud_t = get_user(target.id, getattr(target, "username", "User"), getattr(target, "first_name", "User"))
+
+    if ud_a.get("balance", 0) < price:
+        await update.message.reply_text(f"💸 ɪɴꜱᴜꜰꜰɪᴄɪᴇɴᴛ ʙᴀʟᴀɴᴄᴇ!\nRequired: ${price} | You have: ${ud_a.get('balance', 0)}")
+        return
+
+    update_user(author.id, balance=ud_a.get("balance", 0) - price)
+    t_items = dict(ud_t.get("items") or {})
+    t_items[item_name] = t_items.get(item_name, 0) + 1
+    update_user(target.id, items=t_items)
+
+    a_name = ud_a.get("display_name") or getattr(author, "full_name", None) or author.first_name or "User"
+    t_name = ud_t.get("display_name") or getattr(target, "full_name", None) or target.first_name or "User"
+
+    a_mention = f'<a href="tg://user?id={author.id}">{html_lib.escape(a_name)}</a>'
+    t_mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(t_name)}</a>'
+
+    text = (
+        f"{a_mention} Gɪꜰᴛᴇᴅ {item_name} Tᴏ {t_mention} 🥰\n"
+        f"Dᴇᴅᴜᴄᴛᴇᴅ : -${price}"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+SMALL_CAPS_MAP: Dict[str, str] = {
+    'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ',
+    'g': 'ɢ', 'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ',
+    'm': 'ᴍ', 'n': 'ɴ', 'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ',
+    's': 'ꜱ', 't': 'ᴛ', 'u': 'ᴜ', 'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x',
+    'y': 'ʏ', 'z': 'ᴢ',
+    'A': 'ᴀ', 'B': 'ʙ', 'C': 'ᴄ', 'D': 'ᴅ', 'E': 'ᴇ', 'F': 'ꜰ',
+    'G': 'ɢ', 'H': 'ʜ', 'I': 'ɪ', 'J': 'ᴊ', 'K': 'ᴋ', 'L': 'ʟ',
+    'M': 'ᴍ', 'N': 'ɴ', 'O': 'ᴏ', 'P': 'ᴘ', 'Q': 'ǫ', 'R': 'ʀ',
+    'S': 'ꜱ', 'T': 'ᴛ', 'U': 'ᴜ', 'V': 'ᴠ', 'W': 'ᴡ', 'X': 'x',
+    'Y': 'ʏ', 'Z': 'ᴢ',
+}
+
+def to_small_caps(text: str) -> str:
+    return "".join(SMALL_CAPS_MAP.get(c, c) for c in text)
+
+COLOR_PRESETS: Dict[str, tuple[str, str, str]] = {
+    "red": ("#FF0000", "#000000", "#FFFFFF"),
+    "blue": ("#0984E3", "#FFFFFF", "#DFF9FB"),
+    "green": ("#00B894", "#FFFFFF", "#E8F8F5"),
+    "yellow": ("#F1C40F", "#000000", "#5B4100"),
+    "pink": ("#FD79A8", "#FFFFFF", "#FFF0F5"),
+    "purple": ("#6C5CE7", "#FFFFFF", "#F1F2F6"),
+    "orange": ("#FA8231", "#FFFFFF", "#FFF3CD"),
+    "black": ("#000000", "#FFFFFF", "#FF79C6"),
+    "white": ("#FFFFFF", "#000000", "#E84393"),
+    "cyan": ("#00CEC9", "#000000", "#004E4D"),
+    "dark": ("#181226", "#FFFFFF", "#FF79C6"),
+    "lime": ("#2ECC71", "#000000", "#0B5345"),
+    "teal": ("#009688", "#FFFFFF", "#E0F2F1"),
+    "gold": ("#F39C12", "#000000", "#4E342E"),
+    "rose": ("#E84393", "#FFFFFF", "#FCE4EC"),
+    "grey": ("#636E72", "#FFFFFF", "#DFE6E9"),
+    "gray": ("#636E72", "#FFFFFF", "#DFE6E9"),
+}
+
+
+NAME_FONT_MAP: Dict[str, str] = {
+    "A": "Λ", "B": "ʙ", "C": "ᴄ", "D": "ᴅ", "E": "ᴇ",
+    "F": "ғ", "G": "ɢ", "H": "ʜ", "I": "ɪ", "J": "ᴊ",
+    "K": "ᴋ", "L": "ʟ", "M": "ᴍ", "N": "ɴ", "O": "ᴏ",
+    "P": "ᴘ", "Q": "ǫ", "R": "ʀ", "S": "s", "T": "ᴛ",
+    "U": "ᴜ", "V": "ᴠ", "W": "ᴡ", "X": "x", "Y": "ʏ",
+    "Z": "ᴢ",
+
+    "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ",
+    "f": "ғ", "g": "ɢ", "h": "ʜ", "i": "ɪ", "j": "ᴊ",
+    "k": "ᴋ", "l": "ʟ", "m": "ᴍ", "n": "ɴ", "o": "ᴏ",
+    "p": "ᴘ", "q": "ǫ", "r": "ʀ", "s": "s", "t": "ᴛ",
+    "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "x", "y": "ʏ",
+    "z": "ᴢ"
+}
+
+# Regex to remove ornament signs, emojis, symbols, Tibetan marks, brackets, etc.
+ORNAMENT_PATTERN = re.compile(
+    r"["
+    r"\u0f00-\u0fff"           # Tibetan signs & ornaments (࿐, ༒, ༺, ༻, etc.)
+    r"\u2600-\u27bf"           # Miscellaneous symbols & Dingbats (★, ✿, ⚡, etc.)
+    r"\U0001f300-\U0001f9ff"   # Emojis & Pictographs (👑, 🥀, 🦋, ✨, etc.)
+    r"\U0001fa00-\U0001faff"   # Symbols and Pictographs Extended
+    r"\ufe00-\ufe0f"           # Variation selectors
+    r"亗★☆♛👑⚡✿❀❁❃᭄™©®ʚɞ✦✧𖤍༒༺༻ᯓ✪✫✬✭✮✯✰✨🥀🦋🕊🔥❄️🖤🤍❤️🌸🧸🎀"
+    r"•|~`×†‡〆メ彡父王"
+    r"『』【】「」《》〔〕"
+    r"ꨄ♡♥"
+    r"]+"
+)
+
+def style_author_name(name: str) -> str:
+    """Normalize fancy unicode fonts and strip all decorative symbols/emojis/marks, keeping original clean name."""
+    if not name:
+        return "User"
+
+    # Normalize mathematical/bold/italic fancy unicode fonts to basic Latin (e.g. 𝐀𝐝𝐯𝐚𝐲 -> Advay)
+    norm = unicodedata.normalize("NFKD", str(name))
+
+    # Strip decorative symbols, dingbats, emojis, brackets
+    cleaned = ORNAMENT_PATTERN.sub("", norm)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    if not cleaned:
+        # Fallback to stripped raw name if everything was removed
+        raw_fallback = re.sub(r"\s+", " ", str(name)).strip()
+        cleaned = raw_fallback if raw_fallback else "User"
+
+    return cleaned
+
+
+def generate_quote_sticker(
+    text: str,
+    author_name: str,
+    avatar_bytes: Optional[bytes] = None,
+    bg_color: str = "#181226",
+    text_color: str = "#FFFFFF",
+    author_color: str = "#FF79C6",
+    font_style: str = "normal",
+    shape: str = "classic",
+) -> io.BytesIO:
+    def hex_to_rgb(hex_str: str, default=(24, 18, 38, 255)):
+        try:
+            h = str(hex_str).lstrip("#")
+            if len(h) == 3:
+                h = "".join([c * 2 for c in h])
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return (r, g, b, 255)
+        except Exception:
+            return default
+
+    # Style author name with the requested custom font & ornament
+    styled_name = style_author_name(author_name)
+
+    # Load high-definition fonts (Bold & Big for author name, Regular/Normal for message text)
+    font_bold_path = "assets/fonts/NotoSans-Bold.ttf" if os.path.exists("assets/fonts/NotoSans-Bold.ttf") else "assets/fonts/Roboto-Bold.ttf"
+    font_reg_path = "assets/fonts/NotoSans-Regular.ttf" if os.path.exists("assets/fonts/NotoSans-Regular.ttf") else "assets/fonts/Roboto-Regular.ttf"
+    font_dev_bold_path = "assets/fonts/NotoSansDevanagari-Bold.ttf"
+    font_dev_reg_path = "assets/fonts/NotoSansDevanagari-Regular.ttf"
+    font_emoji_path = "assets/fonts/NotoColorEmoji.ttf"
+
+    is_hindi_name = any("\u0900" <= ch <= "\u097f" for ch in styled_name)
+    is_hindi_text = any("\u0900" <= ch <= "\u097f" for ch in text)
+
+    file_name = font_dev_bold_path if is_hindi_name and os.path.exists(font_dev_bold_path) else font_bold_path
+    file_text = font_dev_reg_path if is_hindi_text and os.path.exists(font_dev_reg_path) else font_reg_path
+
+    if not os.path.exists(file_name):
+        file_name = font_bold_path if os.path.exists(font_bold_path) else None
+    if not os.path.exists(file_text):
+        file_text = font_reg_path if os.path.exists(font_reg_path) else file_name
+
+    # Author Name Bold & Big (44px), Message Normal (40px)
+    if file_name and file_text:
+        font_name = ImageFont.truetype(file_name, 44)
+        font_text = ImageFont.truetype(file_text, 40)
+    else:
+        font_name = ImageFont.load_default()
+        font_text = ImageFont.load_default()
+
+    # Emoji font for colour emoji rendering
+    font_emoji = None
+    if os.path.exists(font_emoji_path):
+        try:
+            font_emoji = ImageFont.truetype(font_emoji_path, 109)  # NotoColorEmoji uses larger sizes
+        except Exception:
+            font_emoji = None
+
+    EMOJI_RE = re.compile(
+        "[\U0001F300-\U0001FAFF"
+        "\U00002600-\U000027BF"
+        "\U0001F000-\U0001F02F"
+        "\U0001F0A0-\U0001F0FF"
+        "\U0001F100-\U0001F1FF"
+        "\U0001F200-\U0001F2FF"
+        "\U0001F900-\U0001F9FF"
+        "\U0000FE00-\U0000FE0F"
+        "\U0001FA00-\U0001FA6F"
+        "\U0001FA70-\U0001FAFF]+",
+        re.UNICODE,
+    )
+
+    def draw_text_with_emoji(draw_ctx, x, y, line, base_font, emoji_font, color, dummy):
+        """Draw a line of text, rendering emoji with emoji_font and rest with base_font."""
+        if not emoji_font:
+            draw_ctx.text((x, y), line, fill=color, font=base_font)
+            return
+        segments = EMOJI_RE.split(line)
+        emoji_matches = EMOJI_RE.findall(line)
+        parts = []
+        for i, seg in enumerate(segments):
+            if seg:
+                parts.append((seg, False))
+            if i < len(emoji_matches):
+                parts.append((emoji_matches[i], True))
+        cur_x = x
+        # Calculate baseline offset so emoji vertically aligns with text
+        base_bbox = dummy.textbbox((0, 0), "A", font=base_font)
+        base_h = base_bbox[3] - base_bbox[1]
+        for seg, is_emoji in parts:
+            if not seg:
+                continue
+            if is_emoji:
+                em_bbox = dummy.textbbox((0, 0), seg, font=emoji_font)
+                em_h = em_bbox[3] - em_bbox[1]
+                em_w = em_bbox[2] - em_bbox[0]
+                # Scale emoji to match text height
+                scale = base_h / max(em_h, 1)
+                em_render_size = int(109 * scale)
+                try:
+                    ef = ImageFont.truetype(font_emoji_path, max(10, em_render_size))
+                except Exception:
+                    ef = emoji_font
+                ef_bbox = dummy.textbbox((0, 0), seg, font=ef)
+                ef_h = ef_bbox[3] - ef_bbox[1]
+                ef_w = ef_bbox[2] - ef_bbox[0]
+                ey = y + (base_h - ef_h) // 2
+                draw_ctx.text((cur_x, ey), seg, fill=color, font=ef, embedded_color=True)
+                cur_x += ef_w + 2
+            else:
+                seg_bbox = dummy.textbbox((0, 0), seg, font=base_font)
+                seg_w = seg_bbox[2] - seg_bbox[0]
+                draw_ctx.text((cur_x, y), seg, fill=base_font if False else color, font=base_font)
+                cur_x += seg_w
+
+    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+    # Process newlines and word wrapping
+    raw_lines = text.split("\n")
+    lines = []
+    max_line_width = 580
+
+    for r_line in raw_lines:
+        words = r_line.split()
+        if not words:
+            lines.append("")
+            continue
+        curr = ""
+        for w in words:
+            test = curr + (" " if curr else "") + w
+            bbox = dummy_draw.textbbox((0, 0), test, font=font_text)
+            if (bbox[2] - bbox[0]) > max_line_width and curr:
+                lines.append(curr)
+                curr = w
+            else:
+                curr = test
+        if curr:
+            lines.append(curr)
+
+    if not lines:
+        lines = [text if text else "(empty)"]
+
+    name_bbox = dummy_draw.textbbox((0, 0), styled_name, font=font_name)
+    name_w = name_bbox[2] - name_bbox[0]
+    name_h = name_bbox[3] - name_bbox[1]
+
+    line_h = 52
+    text_total_h = len(lines) * line_h
+
+    content_w = name_w
+    for l in lines:
+        b = dummy_draw.textbbox((0, 0), l, font=font_text)
+        content_w = max(content_w, b[2] - b[0])
+
+    is_cloud = shape in ("cloud", "cloudy")
+
+    pad_left = 52 if is_cloud else 36
+    pad_right = 72 if is_cloud else 72
+    pad_top = 34 if is_cloud else 26
+    pad_bottom = 34 if is_cloud else 28
+
+    bubble_w = max(int(content_w + pad_left + pad_right), 330 if is_cloud else 320)
+    bubble_h = int(name_h + 18 + text_total_h + pad_top + pad_bottom)
+
+    avatar_size = 104
+    bottom_clearance = 68  # Generous transparent elevation above Telegram timestamp
+
+    total_w = avatar_size + 24 + bubble_w + 24
+    total_h = max(avatar_size + 20, bubble_h + 20) + bottom_clearance
+
+    img = Image.new("RGBA", (int(total_w), int(total_h)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    bg_rgb = hex_to_rgb(bg_color, (24, 18, 38, 255))
+    text_rgb = hex_to_rgb(text_color, (255, 255, 255, 255))
+    author_rgb = hex_to_rgb(author_color, (255, 121, 198, 255))
+
+    av_x = 10
+    av_y = total_h - avatar_size - bottom_clearance - 10
+
+    if avatar_bytes:
+        try:
+            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            av = av.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (avatar_size, avatar_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
+            img.paste(av, (av_x, av_y), mask)
+        except Exception:
+            draw.ellipse([(av_x, av_y), (av_x + avatar_size, av_y + avatar_size)], fill=(255, 105, 180, 255))
+    else:
+        draw.ellipse([(av_x, av_y), (av_x + avatar_size, av_y + avatar_size)], fill=(255, 105, 180, 255))
+        init_letter = (styled_name[:1] if styled_name else "U").upper()
+        init_bbox = dummy_draw.textbbox((0, 0), init_letter, font=font_name)
+        iw = init_bbox[2] - init_bbox[0]
+        ih = init_bbox[3] - init_bbox[1]
+        draw.text(
+            (av_x + (avatar_size - iw) // 2, av_y + (avatar_size - ih) // 2 - 4),
+            init_letter,
+            fill=(255, 255, 255, 255),
+            font=font_name,
+        )
+
+    bx = av_x + avatar_size + (18 if is_cloud else 14)
+    by = total_h - bubble_h - bottom_clearance - 10
+
+    if is_cloud:
+        # Cartoon Scalloped Cloud Speech Bubble matching reference image
+        draw.rounded_rectangle([(bx + 20, by + 20), (bx + bubble_w - 20, by + bubble_h - 20)], radius=32, fill=bg_rgb)
+
+        nx = max(3, int(bubble_w / 90))
+        sx = (bubble_w - 60) / nx
+        for i in range(nx + 1):
+            cx = bx + 30 + i * sx
+            draw.ellipse([(cx - 36, by - 16), (cx + 36, by + 48)], fill=bg_rgb)
+            draw.ellipse([(cx - 36, by + bubble_h - 48), (cx + 36, by + bubble_h + 16)], fill=bg_rgb)
+
+        ny = max(2, int(bubble_h / 80))
+        sy = (bubble_h - 50) / ny
+        for j in range(ny + 1):
+            cy = by + 25 + j * sy
+            draw.ellipse([(bx - 18, cy - 34), (bx + 44, cy + 34)], fill=bg_rgb)
+            draw.ellipse([(bx + bubble_w - 44, cy - 34), (bx + bubble_w + 18, cy + 34)], fill=bg_rgb)
+
+        # Pointed speech tail pointing towards the avatar
+        tail = [
+            (bx + 28, by + bubble_h - 10),
+            (bx - 16, by + bubble_h + 18),
+            (bx + 72, by + bubble_h),
+        ]
+        draw.polygon(tail, fill=bg_rgb)
+    else:
+        # Classic dialogue bubble
+        draw.rounded_rectangle([(bx, by), (bx + bubble_w, by + bubble_h)], radius=26, fill=bg_rgb)
+        tail = [
+            (bx + 4, by + bubble_h - 28),
+            (bx - 14, by + bubble_h - 8),
+            (bx + 22, by + bubble_h),
+        ]
+        draw.polygon(tail, fill=bg_rgb)
+
+    # User's name in BOLD & BIG with custom font styling
+    draw.text((bx + pad_left, by + pad_top), styled_name, fill=author_rgb, font=font_name)
+
+    # Message text in NORMAL (emoji-aware)
+    cur_y = by + pad_top + name_h + 18
+    for l in lines:
+        draw_text_with_emoji(draw, bx + pad_left, cur_y, l, font_text, font_emoji, text_rgb, dummy_draw)
+        cur_y += line_h
+
+    max_dim = max(img.size)
+    if max_dim != 512:
+        ratio = 512.0 / max_dim
+        new_size = (max(1, int(img.size[0] * ratio)), max(1, int(img.size[1] * ratio)))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+    img = ImageEnhance.Sharpness(img).enhance(1.3)
+
+    buf = io.BytesIO()
+    buf.name = "quote.webp"
+    img.save(buf, format="WEBP", quality=100, method=6)
+    buf.seek(0)
+    return buf
+
+
+async def q_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    replied = update.message.reply_to_message
+    if not replied:
+        await update.message.reply_text(
+            "💬 <b>Qᴜᴏᴛᴇ Sᴛɪᴄᴋᴇʀ Uꜱᴀɢᴇ:</b>\n\n"
+            "👉 Reply to a message with <code>/q</code> (Classic Bubble)\n"
+            "👉 Reply with <code>/q cloud</code> or <code>/qc</code> (Cloudy Bubble)\n"
+            "👉 Custom colors: <code>/q pink</code>, <code>/qc blue</code>, <code>/q #FF007F</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    target_user = replied.from_user
+    author_name = "User"
+    user_id_for_photo = None
+
+    if target_user:
+        user_id_for_photo = target_user.id
+        author_name = (
+            f"{target_user.first_name} {target_user.last_name}".strip()
+            if target_user.last_name
+            else (target_user.first_name or target_user.username or "User")
+        )
+    elif replied.sender_chat:
+        author_name = replied.sender_chat.title or "Channel"
+    elif getattr(replied, "forward_sender_name", None):
+        author_name = replied.forward_sender_name
+    elif getattr(replied, "forward_from", None):
+        ff = replied.forward_from
+        user_id_for_photo = ff.id
+        author_name = f"{ff.first_name} {ff.last_name}".strip() if ff.last_name else (ff.first_name or ff.username or "User")
+    elif getattr(replied, "forward_from_chat", None):
+        author_name = replied.forward_from_chat.title or "Channel"
+    elif update.effective_user:
+        target_user = update.effective_user
+        user_id_for_photo = target_user.id
+        author_name = target_user.first_name or target_user.username or "User"
+
+    text = replied.text or replied.caption or (
+        (replied.sticker.emoji or "🎭") if replied.sticker else (
+            "[Photo]" if replied.photo else (
+                "[Animation]" if replied.animation else (
+                    "[Voice]" if replied.voice else "[Media]"
+                )
+            )
+        )
+    )
+
+    avatar_bytes = None
+    if user_id_for_photo:
+        try:
+            photos = await context.bot.get_user_profile_photos(user_id_for_photo, limit=1)
+            if photos.total_count > 0:
+                photo_file = photos.photos[0][-1]
+                file_obj = await context.bot.get_file(photo_file.file_id)
+                av_buf = io.BytesIO()
+                await file_obj.download_to_memory(av_buf)
+                avatar_bytes = av_buf.getvalue()
+        except Exception:
+            pass
+
+    bg_color = "#181226"
+    text_color = "#FFFFFF"
+    author_color = "#FF79C6"
+    font_style = "normal"
+    
+    cmd_name = update.message.text.split()[0].lstrip("/").split("@")[0].lower() if update.message and update.message.text else ""
+    shape = "cloud" if cmd_name in ("qc", "cloudq", "qcloud") else "classic"
+
+    args = [a.lower().strip() for a in (context.args or [])]
+    for a in args:
+        if a in COLOR_PRESETS:
+            bg_color, text_color, author_color = COLOR_PRESETS[a]
+        elif a.startswith("#") and len(a) in (4, 7):
+            bg_color = a
+            try:
+                h = a.lstrip("#")
+                if len(h) == 3:
+                    h = "".join([c * 2 for c in h])
+                r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                text_color = "#000000" if lum > 140 else "#FFFFFF"
+                author_color = "#FFFFFF" if lum <= 140 else "#550055"
+            except Exception:
+                pass
+        elif a in ("smallcaps", "sc"):
+            text = to_small_caps(text)
+        elif a in ("mono", "code", "italic", "cursive", "serif"):
+            font_style = a
+        elif a in ("cloud", "cloudy"):
+            shape = "cloud"
+        elif a in ("classic", "normal", "rect", "box"):
+            shape = "classic"
+
+    sticker_buf = generate_quote_sticker(
+        text,
+        author_name,
+        avatar_bytes,
+        bg_color=bg_color,
+        text_color=text_color,
+        author_color=author_color,
+        font_style=font_style,
+        shape=shape,
+    )
+    await update.message.reply_sticker(sticker=sticker_buf)
+
+
+async def voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    text = " ".join(args).strip() if args else None
+    if not text and update.message.reply_to_message:
+        text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+    if not text:
+        await update.message.reply_text(
+            "🎙️ <b>Vᴏɪᴄᴇ Cᴏᴍᴍᴀɴᴅ</b>\n\n"
+            "👉 <b>Usage:</b> <code>/voice &lt;your text&gt;</code>\n"
+            "👉 Or reply to any message with <code>/voice</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Clean text for smoother voice synthesis
+    clean_text = re.sub(r"http\S+|www\S+|@\w+|#\w+", "", text).strip()
+    if not clean_text:
+        clean_text = text[:300]
+
+    try:
+        is_hindi = any("\u0900" <= ch <= "\u097f" for ch in clean_text)
+        lang = "hi" if is_hindi else "en"
+        tld = "co.in" if is_hindi else "com"
+
+        buf = io.BytesIO()
+        tts = gTTS(text=clean_text[:500], lang=lang, tld=tld)
+        tts.write_to_fp(buf)
+        buf.seek(0)
+
+        preview = (clean_text[:50] + "...") if len(clean_text) > 50 else clean_text
+        caption = f"🎙️ <b>Vᴏɪᴄᴇ Gᴇɴᴇʀᴀᴛᴇᴅ Bʏ Mɪᴋᴏ</b>\n<i>\"{html_lib.escape(preview)}\"</i>"
+        await update.message.reply_voice(voice=buf, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error generating voice: {e}")
+
+
+async def calc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    raw = " ".join(args).strip() if args else None
+    if not raw and update.message.reply_to_message and update.message.reply_to_message.text:
+        raw = update.message.reply_to_message.text.strip()
+        
+    if not raw:
+        await update.message.reply_text(
+            "🧮 <b>ᴍᴀᴛʜ ᴄᴀʟᴄᴜʟᴀᴛᴏʀ</b>\n\n"
+            "Examples:\n"
+            "• <code>/calc 20+10</code>\n"
+            "• <code>/calc 10*10</code>\n"
+            "• <code>/calc 200/10</code>\n"
+            "• <code>/calc 200-10</code>\n"
+            "• <code>/calc 1000 ka 30% kitna hota</code>\n"
+            "• <code>/c 2^8</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    cleaned = raw.lower().strip()
+    
+    # 1) Natural language percentages
+    m = re.search(r'([0-9\.]+)\s*(?:ka|of)\s*([0-9\.]+)\s*%', cleaned)
+    if m:
+        val, pct = float(m.group(1)), float(m.group(2))
+        res_str = f"{(val * pct) / 100.0:g}"
+        await update.message.reply_text(f"🧮 <b>Calculation:</b> <code>{raw}</code>\n<b>Result:</b> <code>{res_str}</code>", parse_mode="HTML")
+        return
+
+    m2 = re.search(r'([0-9\.]+)\s*%\s*(?:of|ka)\s*([0-9\.]+)', cleaned)
+    if m2:
+        pct, val = float(m2.group(1)), float(m2.group(2))
+        res_str = f"{(val * pct) / 100.0:g}"
+        await update.message.reply_text(f"🧮 <b>Calculation:</b> <code>{raw}</code>\n<b>Result:</b> <code>{res_str}</code>", parse_mode="HTML")
+        return
+
+    expr = re.sub(r'(kitna\s*hota\s*(?:hai)?|\?|=|equals|what\s*is)', '', cleaned).strip()
+    expr = expr.replace('^', '**').replace('x', '*').replace('÷', '/')
+
+    allowed_chars = set('0123456789+-*/().% ')
+    if all(c in allowed_chars for c in expr):
+        try:
+            eval_expr = re.sub(r'([0-9\.]+)%', r'(\1/100)', expr)
+            res = eval(eval_expr, {'__builtins__': None}, {})
+            await update.message.reply_text(f"🧮 <b>Calculation:</b> <code>{raw}</code>\n<b>Result:</b> <code>{res:g}</code>", parse_mode="HTML")
+            return
+        except Exception:
+            pass
+
+    try:
+        sym_res = sympy.sympify(expr)
+        await update.message.reply_text(f"🧮 <b>Calculation:</b> <code>{raw}</code>\n<b>Result:</b> <code>{sym_res}</code>", parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text("❌ Could not evaluate math query. Example: <code>/calc 1000 ka 30%</code>", parse_mode="HTML")
+
+
+async def is_deleted_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    target_id = None
+    if args:
+        try:
+            target_id = int(str(args[0]).replace("@", "").strip())
+        except Exception:
+            pass
+    elif update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+
+    if not target_id:
+        await update.message.reply_text("⚠️ format: /is_deleted <user_id>")
+        return
+
+    from modules.utils.storage import get_user
+    ud = get_user(target_id)
+
+    name = None
+    try:
+        chat = await context.bot.get_chat(target_id)
+        if chat.first_name and "deleted" in chat.first_name.lower():
+            await update.message.reply_text("❌ Account is Deleted or Not Found!")
+            return
+        name = ud.get("display_name") or chat.first_name or chat.username or f"User {target_id}"
+    except Exception:
+        if ud and (ud.get("display_name") or ud.get("username") and ud.get("username") != "User"):
+            name = ud.get("display_name") or ud.get("username")
+        else:
+            await update.message.reply_text("❌ Account is Deleted or Not Found!")
+            return
+
+    mention = f'<a href="tg://user?id={target_id}">{html_lib.escape(name)}</a>'
+    text = (
+        "✅ Account is Active!\n"
+        f"👤 Name: {mention}\n"
+        f"🆔 ID: {target_id}"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type == "private":
+        await update.message.reply_text("🛡️ Run this in a group!")
+        return
+
+    replied = update.message.reply_to_message
+    if not replied:
+        await update.message.reply_text("🛡️ Reply to the message you want to report: /report [reason]")
+        return
+
+    reason = " ".join(context.args).strip() if context.args else "Suspicious / spam message"
+    reporter_name = user.first_name or user.username or "Someone"
+    reported_user = replied.from_user
+    reported_name = reported_user.first_name if reported_user else "User"
+
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        admin_mentions = []
+        for a in admins:
+            if not a.user.is_bot:
+                admin_mentions.append(f"[{a.user.first_name}](tg://user?id={a.user.id})")
+        
+        msg = (
+            f"🚨 <b>USER REPORTED TO ADMINS</b>\n\n"
+            f"👤 <b>Reported User:</b> {reported_name} (<code>{reported_user.id if reported_user else 'N/A'}</code>)\n"
+            f"📢 <b>Reported By:</b> {reporter_name}\n"
+            f"📝 <b>Reason:</b> {reason}\n\n"
+            f"Admins: {', '.join(admin_mentions[:5])}"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+    except Exception:
+        await update.message.reply_text(f"🚨 Reported message to admins! (Reason: {reason})")
+
+
+async def setemoji(update, context):
+    user = update.effective_user
+    args = context.args or []
+    ud = get_user(user.id, user.username or user.first_name or "User", user.first_name)
+    if not ud.get("premium"):
+        chat = update.effective_chat
+        is_group = bool(chat and chat.type != "private")
+        uid = user.id
+        checkout_url = f"https://mike-payment.vercel.app/checkout.html?user_id={uid}"
+        
+        if is_group:
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 ᴘᴀʏ ɴᴏᴡ → ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ", url=checkout_url)],
+            ])
+        else:
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 ᴘᴀʏ ɴᴏᴡ → ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ", web_app=WebAppInfo(url=checkout_url))],
+            ])
+        await update.message.reply_text(
+            "💓 Oɴʟʏ Pʀᴇᴍɪᴜᴍ Uꜱᴇʀꜱ Cᴀɴ Sᴇᴛ Tʜᴇɪʀ Cᴜꜱᴛᴏᴍ Eᴍᴏᴊɪ.\n"
+            " Uᴘɢʀᴀᴅᴇ Tᴏ Pʀᴇᴍɪᴜᴍ → /pay",
+            reply_markup=kb,
+        )
+        return
+    if not args:
+        await update.message.reply_text("😀 Usage: /setemoji <emoji> (or reply to a friend with /setemoji <emoji>)")
+        return
+    emoji = args[0].strip()
+
+    target = _reply_user(update)
+    if target and target.id != user.id:
+        update_user(target.id, emoji=emoji)
+        mention = f'<a href="tg://user?id={target.id}">{html_lib.escape(target.first_name or "User")}</a>'
+        await update.message.reply_text(f"✅ Custom emoji for {mention} is now: {emoji}", parse_mode="HTML")
+    else:
+        update_user(user.id, emoji=emoji)
+        await update.message.reply_text(f"✅ Your custom emoji is now: {emoji}")
+
+
+async def check_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    caller = update.effective_user
+    from modules.utils.storage import get_user, get_all_users
+    ud_caller = get_user(caller.id, getattr(caller, "username", "User"), getattr(caller, "first_name", "User"))
+
+    if not ud_caller.get("premium"):
+        await update.message.reply_text("💓 Tʜɪꜱ Cᴏᴍᴍᴀɴᴅ Iꜱ Oɴʟʏ Fᴏʀ Pʀᴇᴍɪᴜᴍ Uꜱᴇʀꜱ. Bᴜʏ Pʀᴇᴍɪᴜᴍ Uꜱɪɴɢ→ /pay")
+        return
+
+    replied = _reply_user(update)
+    args = context.args or []
+    target_id = None
+    target_obj = None
+
+    if replied:
+        target_id = replied.id
+        target_obj = replied
+    elif args:
+        arg = args[0].strip()
+        if arg.startswith("@"):
+            uname = arg[1:].lower()
+            all_users = get_all_users()
+            for uid_str, uinfo in all_users.items():
+                if (uinfo.get("username") or "").lower() == uname:
+                    target_id = int(uid_str)
+                    break
+        elif arg.isdigit():
+            target_id = int(arg)
+        else:
+            uname = arg.lower()
+            all_users = get_all_users()
+            for uid_str, uinfo in all_users.items():
+                if (uinfo.get("username") or "").lower() == uname:
+                    target_id = int(uid_str)
+                    break
+
+    if not target_id:
+        target_id = caller.id
+        target_obj = caller
+
+    ud_t = get_user(target_id)
+    raw_name = ud_t.get("display_name") or (target_obj.first_name if target_obj else None) or ud_t.get("username") or f"User {target_id}"
+    mention = f'<a href="tg://user?id={target_id}">{html_lib.escape(raw_name)}</a>'
+    emoji = ud_t.get("emoji") or "❌ None"
+
+    import time
+    now_ts = time.time()
+    prot_until = ud_t.get("protected_until", 0)
+    if ud_t.get("protected") and prot_until and prot_until > now_ts:
+        rem_secs = int(prot_until - now_ts)
+        hrs = rem_secs // 3600
+        mins = (rem_secs % 3600) // 60
+        secs = rem_secs % 60
+        prot_str = f"{hrs}ʜ {mins}ᴍ {secs}ꜱ Rᴇᴍᴀɪɴɪɴɢ"
+    else:
+        prot_str = "❌ Nᴏɴᴇ"
+
+    await update.message.reply_text(
+        f"✨ <b>Uꜱᴇʀ Cʜᴇᴄᴋ</b> — {mention}\n"
+        f"✨ Eᴍᴏᴊɪ: {emoji}\n"
+        f"🛡️ Pʀᴏᴛᴇᴄᴛɪᴏɴ: {prot_str}\n"
+        f"👑 Pʀᴇᴍɪᴜᴍ: {'Yᴇꜱ' if ud_t.get('premium') else 'Nᴏ'}",
+        parse_mode="HTML",
+    )
+
+
+async def detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    replied = _reply_user(update)
+    args = context.args or []
+    from modules.utils.storage import get_all_users
+    all_users = get_all_users()
+
+    target_id = None
+    target_obj = None
+
+    if replied:
+        target_id = replied.id
+        target_obj = replied
+    elif args:
+        arg = args[0].strip()
+        if arg.startswith("@"):
+            uname = arg[1:].lower()
+            for uid_str, uinfo in all_users.items():
+                if (uinfo.get("username") or "").lower() == uname:
+                    target_id = int(uid_str)
+                    break
+        elif arg.isdigit():
+            if arg in all_users:
+                target_id = int(arg)
+            else:
+                try:
+                    target_id = int(arg)
+                except Exception:
+                    pass
+        else:
+            uname = arg.lower()
+            for uid_str, uinfo in all_users.items():
+                if (uinfo.get("username") or "").lower() == uname:
+                    target_id = int(uid_str)
+                    break
+
+    if not target_id:
+        await update.message.reply_text("⚠️ Uꜱᴀɢᴇ: /detail <ᴜꜱᴇʀɴᴀᴍᴇ/ʀᴇᴘʟʏ/ɪᴅ>")
+        return
+
+    if target_obj:
+        ud = get_user(
+            target_id,
+            getattr(target_obj, "username", None) or "User",
+            getattr(target_obj, "full_name", None) or target_obj.first_name,
+        )
+    else:
+        ud = get_user(target_id)
+
+    raw_name = ud.get("display_name") or (target_obj.first_name if target_obj else None) or ud.get("username") or f"User {target_id}"
+
+    # Past names
+    past_names = list(ud.get("past_names") or [])
+    if raw_name and raw_name not in past_names:
+        past_names.append(raw_name)
+    if not past_names:
+        past_names = [raw_name]
+    names_block = "\n".join([f"• {html_lib.escape(n)}" for n in past_names if n])
+
+    # Past usernames
+    curr_uname = None
+    if target_obj and getattr(target_obj, "username", None):
+        curr_uname = target_obj.username
+    elif ud.get("username") and ud.get("username") != "User":
+        curr_uname = ud.get("username")
+
+    past_unames = list(ud.get("past_usernames") or [])
+    if curr_uname and curr_uname not in past_unames:
+        past_unames.append(curr_uname)
+
+    valid_unames = [u for u in past_unames if u and u != "User"]
+    if valid_unames:
+        unames_block = "\n".join([f"• @{html_lib.escape(u.lstrip('@'))}" for u in valid_unames])
+    else:
+        unames_block = "• None"
+
+    mention = f'<a href="tg://user?id={target_id}">{html_lib.escape(raw_name)}</a>'
+    text = (
+        f"{mention}'s Hɪꜱᴛᴏʀʏ\n"
+        "________________________\n"
+        "Fᴜʟʟ Nᴀᴍᴇꜱ:\n"
+        f"{names_block}\n\n"
+        "-----------\n"
+        "Uꜱᴇʀɴᴀᴍᴇꜱ:\n"
+        f"{unames_block}"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def owner_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("👑 Run this in a group!")
+        return
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        owner = next((m for m in admins if m.status == "creator"), None)
+        if owner:
+            await update.message.reply_text(f"👑 Group Owner: [{owner.user.first_name}](tg://user?id={owner.user.id})", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("👑 No owner found.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def admins_cmd(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("🛡️ Run this in a group!")
+        return
+    try:
+        admins = await context.bot.get_chat_administrators(chat.id)
+        from modules.utils.storage import get_all_users
+        all_users = get_all_users()
+
+        owner_mention = "None"
+        admin_lines = []
+
+        for m in admins:
+            if m.user.is_bot:
+                continue
+            u_id = m.user.id
+            ud = all_users.get(str(u_id), {})
+            name = ud.get("display_name") or getattr(m.user, "full_name", None) or m.user.first_name or "User"
+            mention = f'<a href="tg://user?id={u_id}">{html_lib.escape(name)}</a>'
+
+            if m.status == "creator":
+                owner_mention = mention
+            else:
+                admin_lines.append(f"• {mention}")
+
+        total_admins = (1 if owner_mention != "None" else 0) + len(admin_lines)
+        admins_block = "\n".join(admin_lines) if admin_lines else "• None"
+
+        text = (
+            f"👑 <b>Gʀᴏᴜᴘ Oᴡɴᴇʀ:</b> {owner_mention}\n\n"
+            f"🛡️ <b>Aᴅᴍɪɴꜱ:</b>\n"
+            f"{admins_block}\n\n"
+            f"👥 <b>Tᴏᴛᴀʟ Aᴅᴍɪɴꜱ:</b> {total_admins}"
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+INTRO_FORMAT_HELP = (
+    "⚠️ Intro format:\n"
+    "⚡ /intro reply\n"
+    "⚡ /intro me (with/without reply)\n"
+    "⚡ /setintro intro text"
+)
+
+
+async def intro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args or []
+    sub = (args[0].lower() if args else "").strip()
+    author = update.effective_user
+    replied = _reply_user(update)
+
+    if sub == "reply":
+        if not replied:
+            await update.message.reply_text(INTRO_FORMAT_HELP)
+            return
+        target = replied
+    elif sub == "me":
+        target = author
+    else:
+        await update.message.reply_text(INTRO_FORMAT_HELP)
+        return
+
+    ud = get_user(
+        target.id,
+        getattr(target, "username", None) or (target.first_name or "User"),
+        target.first_name,
+    )
+    intro_text = ud.get("intro_text")
+    name = ud.get("display_name") or target.first_name or "User"
+
+    if not intro_text:
+        if target.id == author.id:
+            await update.message.reply_text(
+                "❌ You haven't set an intro yet.\nUse <code>/setintro &lt;text&gt;</code> to set your intro.",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ <b>{name}</b> hasn't set an intro yet.",
+                parse_mode="HTML",
+            )
+        return
+
+    await update.message.reply_text(
+        f"⚡ <b>Intro of {name}:</b>\n\n{intro_text}",
+        parse_mode="HTML",
+    )
+
+
+async def setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = None
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        text = update.message.reply_to_message.text.strip()
+    args = context.args or []
+    if args:
+        joined = " ".join(args).strip()
+        if joined:
+            text = joined
+    if not text:
+        await update.message.reply_text(INTRO_FORMAT_HELP)
+        return
+    if len(text) > 500:
+        text = text[:500]
+    get_user(user.id, user.username or user.first_name or "User", user.first_name)
+    update_user(user.id, intro_text=text)
+    await update.message.reply_text("✅ Your intro has been saved! Preview: /intro me")
+
+
+def _convert_image_to_sticker_bytes(image_bytes: bytes) -> io.BytesIO:
+    """Convert any image to Telegram standard static sticker (512x512 PNG, alpha preserved)."""
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    w, h = im.size
+    scale = 512.0 / max(w, h)
+    new_w = max(1, min(512, int(w * scale)))
+    new_h = max(1, min(512, int(h * scale)))
+    if new_w >= new_h:
+        new_w = 512
+    else:
+        new_h = 512
+    im = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    out = io.BytesIO()
+    out.name = "sticker.png"
+    im.save(out, format="PNG", optimize=True)
+    out.seek(0)
+    return out
+
+
+async def own(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kang / Add Sticker, Photo, or Image Document to your custom sticker pack."""
+    replied = update.message.reply_to_message if update.message else None
+    src_sticker = replied.sticker if (replied and replied.sticker) else None
+    src_photo = replied.photo[-1] if (replied and replied.photo) else None
+    src_doc = (
+        replied.document
+        if (replied and replied.document and (
+            getattr(replied.document, "mime_type", "").startswith("image/") or
+            getattr(replied.document, "file_name", "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        ))
+        else None
+    )
+
+    if not replied or (not src_sticker and not src_photo and not src_doc):
+        await update.message.reply_text(
+            "⚠️ <b>Rᴇᴘʟʏ Tᴏ A Sᴛɪᴄᴋᴇʀ, Pʜᴏᴛᴏ, Oʀ Iᴍᴀɢᴇ Tᴏ Aᴅᴅ Iɴ Yᴏᴜʀ Pᴀᴄᴋ.</b>\n\n"
+            "👉 <b>Uꜱᴀɢᴇ:</b>\n"
+            "• <code>/own</code> or <code>/kang</code> (Default Pack)\n"
+            "• <code>/own &lt;number&gt;</code> (Create/Add to Pack Vol 2, 3...)\n"
+            "• <code>/own &lt;emoji&gt;</code> (Custom Emoji e.g. <code>/kang 🔥</code>)\n"
+            "• <code>/own &lt;number&gt; &lt;emoji&gt;</code> (e.g. <code>/kang 2 😂</code>)",
+            parse_mode="HTML",
+        )
+        return
+
+    user = update.effective_user
+    bot = context.bot
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+
+    args = context.args or []
+    target_vol = None
+    custom_emoji = None
+    for a in args:
+        if a.isdigit() and int(a) > 0:
+            target_vol = int(a)
+        else:
+            custom_emoji = a.strip()
+
+    wait_msg = await update.message.reply_text("⏳ <i>Processing sticker...</i>", parse_mode="HTML")
+
+    try:
+        if src_sticker:
+            if src_sticker.is_animated:
+                st_format = "animated"
+                type_label = "Aɴɪᴍᴀᴛᴇᴅ"
+                base_suffix = f"anim_{user.id}"
+            elif src_sticker.is_video:
+                st_format = "video"
+                type_label = "Vɪᴅᴇᴏ"
+                base_suffix = f"vid_{user.id}"
+            else:
+                st_format = "static"
+                type_label = "Sᴛᴀᴛɪᴄ"
+                base_suffix = f"static_{user.id}"
+            emoji = custom_emoji or src_sticker.emoji or "✨"
+            input_sticker = InputSticker(
+                sticker=src_sticker.file_id,
+                emoji_list=[emoji],
+            )
+        else:
+            st_format = "static"
+            type_label = "Sᴛᴀᴛɪᴄ"
+            base_suffix = f"static_{user.id}"
+            emoji = custom_emoji or "✨"
+
+            file_id = src_photo.file_id if src_photo else src_doc.file_id
+            tg_file = await bot.get_file(file_id)
+            buf = io.BytesIO()
+            await tg_file.download_to_memory(buf)
+            buf.seek(0)
+
+            st_buf = _convert_image_to_sticker_bytes(buf.getvalue())
+            input_sticker = InputSticker(
+                sticker=st_buf,
+                emoji_list=[emoji],
+            )
+
+        def get_pack_info(v: int):
+            v_str = f"_v{v}" if v > 1 else ""
+            p_name = f"radha_{base_suffix}{v_str}_by_{bot_username}"
+            p_title = f"{user.first_name}'s Radha {type_label} Pack" + (f" Vol {v}" if v > 1 else "")
+            return p_name, p_title
+
+        start_vol = target_vol if target_vol is not None else 1
+        max_attempts = 10 if target_vol is None else 1
+        current_vol = start_vol
+
+        success = False
+        final_pack_name = ""
+        resp_text = ""
+
+        for attempt in range(max_attempts):
+            p_name, p_title = get_pack_info(current_vol)
+
+            pack_exists = False
+            try:
+                await bot.get_sticker_set(name=p_name)
+                pack_exists = True
+            except Exception:
+                pack_exists = False
+
+            if pack_exists:
+                try:
+                    await bot.add_sticker_to_set(
+                        user_id=user.id,
+                        name=p_name,
+                        sticker=input_sticker,
+                    )
+                    final_pack_name = p_name
+                    vol_label = f" Vol {current_vol}" if current_vol > 1 else ""
+                    resp_text = (
+                        f"✨ <b>Sᴛɪᴄᴋᴇʀ Aᴅᴅᴇᴅ Tᴏ Yᴏᴜʀ {type_label} Pᴀᴄᴋ{vol_label}!</b>\n\n"
+                        f"⚡️ <b>Iᴛ Cᴀɴ Tᴀᴋᴇ 2-3 Mɪɴꜱ Tᴏ Rᴇꜰʟᴇᴄᴛ.</b>"
+                    )
+                    success = True
+                    break
+                except Exception as add_err:
+                    add_msg = str(add_err).lower()
+                    if "full" in add_msg or "stickers_too_much" in add_msg or "too much" in add_msg:
+                        if target_vol is not None:
+                            await wait_msg.edit_text(
+                                f"⚠️ <b>Pack Vol {current_vol} is Full!</b>\nUse <code>/own {current_vol + 1}</code> to create/use the next volume.",
+                                parse_mode="HTML",
+                            )
+                            return
+                        current_vol += 1
+                        continue
+                    elif "already occupied" in add_msg or "user_id_invalid" in add_msg:
+                        current_vol += 1
+                        continue
+                    else:
+                        raise add_err
+            else:
+                try:
+                    await bot.create_new_sticker_set(
+                        user_id=user.id,
+                        name=p_name,
+                        title=p_title,
+                        stickers=[input_sticker],
+                        sticker_format=st_format,
+                    )
+                    final_pack_name = p_name
+                    vol_label = f" Vol {current_vol}" if current_vol > 1 else ""
+                    resp_text = (
+                        f"✨ <b>Nᴇᴡ {type_label} Pᴀᴄᴋ{vol_label} Cʀᴇᴀᴛᴇᴅ &amp; Sᴛɪᴄᴋᴇʀ Sᴀᴠᴇᴅ!</b>\n\n"
+                        f"⚡️ <b>Iᴛ Cᴀɴ Tᴀᴋᴇ 2-3 Mɪɴꜱ Tᴏ Rᴇꜰʟᴇᴄᴛ.</b>"
+                    )
+                    success = True
+                    break
+                except Exception as create_err:
+                    create_msg = str(create_err).lower()
+                    if "already occupied" in create_msg or "occupied" in create_msg:
+                        try:
+                            await bot.add_sticker_to_set(
+                                user_id=user.id,
+                                name=p_name,
+                                sticker=input_sticker,
+                            )
+                            final_pack_name = p_name
+                            vol_label = f" Vol {current_vol}" if current_vol > 1 else ""
+                            resp_text = (
+                                f"✨ <b>Sᴛɪᴄᴋᴇʀ Aᴅᴅᴇᴅ Tᴏ Yᴏᴜʀ {type_label} Pᴀᴄᴋ{vol_label}!</b>\n\n"
+                                f"⚡️ <b>Iᴛ Cᴀɴ Tᴀᴋᴇ 2-3 Mɪɴꜱ Tᴏ Rᴇꜰʟᴇᴄᴛ.</b>"
+                            )
+                            success = True
+                            break
+                        except Exception:
+                            current_vol += 1
+                            continue
+                    else:
+                        raise create_err
+
+        if success:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👉 Oᴘᴇɴ Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋ", url=f"https://t.me/addstickers/{final_pack_name}")]
+            ])
+            await wait_msg.edit_text(resp_text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        err_str = str(e)
+        if "PEER_ID_INVALID" in err_str or "USER_NOT_MUTUAL_CONTACT" in err_str or "bot can't initiate conversation" in err_str.lower():
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Start Radha In PM", url=f"https://t.me/{bot_username}?start=start")]
+            ])
+            await wait_msg.edit_text(
+                "⚠️ <b>Pʟᴇᴀꜱᴇ ꜱᴛᴀʀᴛ Rᴀᴅʜᴀ ɪɴ PM ꜰɪʀꜱᴛ ᴛᴏ ᴄʀᴇᴀᴛᴇ ʏᴏᴜʀ ᴏᴡɴ ᴘᴀᴄᴋ!</b>",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        else:
+            await wait_msg.edit_text(f"❌ Error: {e}")
+
+
+async def clone_pack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clone an entire sticker set into your own personal sticker pack (fStikBot style)."""
+    replied = update.message.reply_to_message if update.message else None
+    if not replied or not replied.sticker or not replied.sticker.set_name:
+        await update.message.reply_text(
+            "⚠️ <b>Rᴇᴘʟʏ Tᴏ A Sᴛɪᴄᴋᴇʀ Fʀᴏᴍ A Pᴀᴄᴋ Tᴏ Cʟᴏɴᴇ Iᴛ!</b>\n\n"
+            "👉 <b>Uꜱᴀɢᴇ:</b>\n"
+            "• Reply to any sticker with <code>/clone</code>\n"
+            "• Custom Pack Title: <code>/clone My Cool Pack</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    user = update.effective_user
+    bot = context.bot
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+
+    src_sticker = replied.sticker
+    src_set_name = src_sticker.set_name
+
+    wait_msg = await update.message.reply_text("⏳ <i>Fetching sticker pack details...</i>", parse_mode="HTML")
+
+    try:
+        src_set = await bot.get_sticker_set(src_set_name)
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Could not fetch sticker pack: {e}")
+        return
+
+    if not src_set.stickers:
+        await wait_msg.edit_text("❌ This sticker pack is empty.")
+        return
+
+    if src_set.is_animated:
+        st_format = "animated"
+        type_label = "Aɴɪᴍᴀᴛᴇᴅ"
+    elif src_set.is_video:
+        st_format = "video"
+        type_label = "Vɪᴅᴇᴏ"
+    else:
+        st_format = "static"
+        type_label = "Sᴛᴀᴛɪᴄ"
+
+    args = context.args or []
+    custom_title = " ".join(args).strip() if args else None
+    pack_title = custom_title or f"{user.first_name}'s {src_set.title}"
+
+    raw_hash = hashlib.md5(f"{src_set_name}_{user.id}".encode()).hexdigest()[:6]
+    pack_name = f"miko_c_{user.id}_{raw_hash}_by_{bot_username}"
+
+    pack_exists = False
+    try:
+        await bot.get_sticker_set(name=pack_name)
+        pack_exists = True
+    except Exception:
+        pack_exists = False
+
+    stickers_to_copy = list(src_set.stickers)
+    total = len(stickers_to_copy)
+    copied_count = 0
+
+    first_st = stickers_to_copy[0]
+    first_input = InputSticker(
+        sticker=first_st.file_id,
+        emoji_list=first_st.emoji if isinstance(first_st.emoji, list) else [first_st.emoji or "✨"],
+    )
+
+    if not pack_exists:
+        try:
+            await bot.create_new_sticker_set(
+                user_id=user.id,
+                name=pack_name,
+                title=pack_title,
+                stickers=[first_input],
+                sticker_format=st_format,
+            )
+            copied_count = 1
+        except Exception as e:
+            err_str = str(e)
+            if "PEER_ID_INVALID" in err_str or "USER_NOT_MUTUAL_CONTACT" in err_str or "bot can't initiate conversation" in err_str.lower():
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💬 Start Radha In PM", url=f"https://t.me/{bot_username}?start=start")]
+                ])
+                await wait_msg.edit_text(
+                    "⚠️ <b>Pʟᴇᴀꜱᴇ ꜱᴛᴀʀᴛ Rᴀᴅʜᴀ ɪɴ PM ꜰɪʀꜱᴛ ᴛᴏ ᴄʀᴇᴀᴛᴇ ʏᴏᴜʀ ᴏᴡɴ ᴘᴀᴄᴋ!</b>",
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                )
+                return
+            await wait_msg.edit_text(f"❌ Failed to create cloned pack: {e}")
+            return
+
+    remaining = stickers_to_copy[1:] if not pack_exists else stickers_to_copy
+    last_edit_time = time.time()
+
+    for idx, st in enumerate(remaining, start=1 if not pack_exists else 0):
+        try:
+            inp = InputSticker(
+                sticker=st.file_id,
+                emoji_list=st.emoji if isinstance(st.emoji, list) else [st.emoji or "✨"],
+            )
+            await bot.add_sticker_to_set(
+                user_id=user.id,
+                name=pack_name,
+                sticker=inp,
+            )
+            copied_count += 1
+        except Exception:
+            pass
+
+        now = time.time()
+        if (now - last_edit_time > 2.5) or (idx == len(remaining)):
+            last_edit_time = now
+            pct = int((copied_count / total) * 100)
+            filled = int((copied_count / total) * 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            try:
+                await wait_msg.edit_text(
+                    f"⏳ <b>Cʟᴏɴɪɴɢ Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋ...</b>\n\n"
+                    f"📦 <b>Sᴏᴜʀᴄᴇ:</b> {html_lib.escape(src_set.title)}\n"
+                    f"📊 <b>Pʀᴏɢʀᴇꜱꜱ:</b> <code>[{bar}]</code> {pct}% ({copied_count}/{total})\n"
+                    f"⚡ <i>Pʟᴇᴀꜱᴇ ᴡᴀɪᴛ ᴀ ᴍᴏᴍᴇɴᴛ...</i>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0.3)
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👉 Oᴘᴇɴ Cʟᴏɴᴇᴅ Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋ", url=f"https://t.me/addstickers/{pack_name}")]
+    ])
+    await wait_msg.edit_text(
+        f"🎉 <b>Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋ Cʟᴏɴᴇᴅ Sᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ!</b>\n\n"
+        f"📦 <b>Tɪᴛʟᴇ:</b> {html_lib.escape(pack_title)}\n"
+        f"🔢 <b>Tᴏᴛᴀʟ Sᴛɪᴄᴋᴇʀꜱ:</b> <code>{copied_count}</code> / <code>{total}</code>\n"
+        f"🎨 <b>Fᴏʀᴍᴀᴛ:</b> {type_label}\n"
+        f"⚡ <b>Iᴛ Mᴀʏ Tᴀᴋᴇ 1-2 Mɪɴᴜᴛᴇꜱ Tᴏ Rᴇꜰʟᴇᴄᴛ Oɴ Tᴇʟᴇɢʀᴀᴍ.</b>",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def del_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete a sticker from your Radha sticker pack."""
+    replied = update.message.reply_to_message if update.message else None
+    if not replied or not replied.sticker:
+        await update.message.reply_text(
+            "⚠️ <b>Rᴇᴘʟʏ Tᴏ A Sᴛɪᴄᴋᴇʀ Iɴ Yᴏᴜʀ Pᴀᴄᴋ Tᴏ Dᴇʟᴇᴛᴇ Iᴛ!</b>\n"
+            "👉 Uꜱᴀɢᴇ: Reply with <code>/delsticker</code> or <code>/del</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    bot = context.bot
+    src_sticker = replied.sticker
+
+    try:
+        await bot.delete_sticker_from_set(sticker=src_sticker.file_id)
+        await update.message.reply_text(
+            "🗑️ <b>Sᴛɪᴄᴋᴇʀ Dᴇʟᴇᴛᴇᴅ Sᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ Fʀᴏᴍ Yᴏᴜʀ Pᴀᴄᴋ!</b>\n"
+            "⚡ <i>Iᴛ ᴍᴀʏ ᴛᴀᴋᴇ ᴀ ᴍᴏᴍᴇɴᴛ ᴛᴏ ᴜᴘᴅᴀᴛᴇ ᴏɴ Tᴇʟᴇɢʀᴀᴍ.</i>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "stickerset_invalid" in err_msg or "not part of" in err_msg or "forbidden" in err_msg:
+            await update.message.reply_text("❌ You can only delete stickers from packs created by Radha Bot.")
+        else:
+            await update.message.reply_text(f"❌ Failed to delete sticker: {e}")
+
+
+async def mypacks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all user sticker packs created with Radha."""
+    user = update.effective_user
+    bot = context.bot
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username
+
+    wait_msg = await update.message.reply_text("⏳ <i>Scanning your sticker packs...</i>", parse_mode="HTML")
+
+    found_packs = []
+    types = [
+        ("static", "Sᴛᴀᴛɪᴄ", f"static_{user.id}"),
+        ("anim", "Aɴɪᴍᴀᴛᴇᴅ", f"anim_{user.id}"),
+        ("vid", "Vɪᴅᴇᴏ", f"vid_{user.id}"),
+    ]
+
+    for type_code, type_lbl, suffix in types:
+        for prefix in ("radha_", "miko_"):
+            for v in range(1, 11):
+                v_str = f"_v{v}" if v > 1 else ""
+                p_name = f"{prefix}{suffix}{v_str}_by_{bot_username}"
+                try:
+                    s_set = await bot.get_sticker_set(p_name)
+                    if s_set:
+                        found_packs.append({
+                            "name": p_name,
+                            "title": s_set.title,
+                            "count": len(s_set.stickers),
+                            "type": type_lbl,
+                        })
+                except Exception:
+                    if v > 1:
+                        break
+
+    if not found_packs:
+        await wait_msg.edit_text(
+            "📦 <b>Yᴏᴜ Hᴀᴠᴇ Nᴏ Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋꜱ Yᴇᴛ!</b>\n\n"
+            "👉 Reply to any sticker or photo with <code>/kang</code> or <code>/own</code> to create your first pack!",
+            parse_mode="HTML",
+        )
+        return
+
+    text = "📦 <b>Yᴏᴜʀ Rᴀᴅʜᴀ Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋꜱ:</b>\n\n"
+    buttons = []
+    for idx, p in enumerate(found_packs, start=1):
+        text += f"{idx}. <b>{html_lib.escape(p['title'])}</b>\n   └ 🎨 <i>{p['type']}</i> • 🔢 <code>{p['count']} stickers</code>\n\n"
+        buttons.append([InlineKeyboardButton(f"👉 {p['title']} ({p['count']})", url=f"https://t.me/addstickers/{p['name']}")])
+
+    kb = InlineKeyboardMarkup(buttons)
+    await wait_msg.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def stok_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Convert static sticker into high-resolution PNG image."""
+    replied = update.message.reply_to_message if update.message else None
+    if not replied or not replied.sticker:
+        await update.message.reply_text("⚠️ <b>Rᴇᴘʟʏ Tᴏ A Sᴛɪᴄᴋᴇʀ Tᴏ Cᴏɴᴠᴇʀᴛ Iᴛ Tᴏ Iᴍᴀɢᴇ!</b>", parse_mode="HTML")
+        return
+
+    src_sticker = replied.sticker
+    if src_sticker.is_animated or src_sticker.is_video:
+        await update.message.reply_text("⚠️ Animated and video stickers cannot be converted to static images.")
+        return
+
+    wait_msg = await update.message.reply_text("⏳ <i>Converting sticker to PNG...</i>", parse_mode="HTML")
+    bot = context.bot
+
+    try:
+        tg_file = await bot.get_file(src_sticker.file_id)
+        buf = io.BytesIO()
+        await tg_file.download_to_memory(buf)
+        buf.seek(0)
+
+        im = Image.open(buf).convert("RGBA")
+        out_buf = io.BytesIO()
+        out_buf.name = "sticker.png"
+        im.save(out_buf, format="PNG")
+        out_buf.seek(0)
+
+        await wait_msg.delete()
+        await update.message.reply_document(
+            document=out_buf,
+            caption="🖼️ <b>Hᴇʀᴇ Iꜱ Yᴏᴜʀ Sᴛɪᴄᴋᴇʀ Aꜱ Pɴɢ Iᴍᴀɢᴇ!</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Conversion failed: {e}")
+
+
+async def tosticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Convert photo or image document to standalone Telegram sticker."""
+    replied = update.message.reply_to_message if update.message else None
+    src_photo = replied.photo[-1] if (replied and replied.photo) else None
+    src_doc = (
+        replied.document
+        if (replied and replied.document and (
+            getattr(replied.document, "mime_type", "").startswith("image/") or
+            getattr(replied.document, "file_name", "").lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        ))
+        else None
+    )
+
+    if not replied or (not src_photo and not src_doc):
+        await update.message.reply_text("⚠️ <b>Rᴇᴘʟʏ Tᴏ A Pʜᴏᴛᴏ Oʀ Iᴍᴀɢᴇ Tᴏ Cᴏɴᴠᴇʀᴛ Tᴏ Sᴛɪᴄᴋᴇʀ!</b>", parse_mode="HTML")
+        return
+
+    wait_msg = await update.message.reply_text("⏳ <i>Converting image to sticker...</i>", parse_mode="HTML")
+    bot = context.bot
+
+    try:
+        file_id = src_photo.file_id if src_photo else src_doc.file_id
+        tg_file = await bot.get_file(file_id)
+        buf = io.BytesIO()
+        await tg_file.download_to_memory(buf)
+        buf.seek(0)
+
+        st_buf = _convert_image_to_sticker_bytes(buf.getvalue())
+        im = Image.open(st_buf).convert("RGBA")
+        webp_buf = io.BytesIO()
+        webp_buf.name = "sticker.webp"
+        im.save(webp_buf, format="WEBP")
+        webp_buf.seek(0)
+
+        await wait_msg.delete()
+        await update.message.reply_sticker(sticker=webp_buf)
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Conversion failed: {e}")
+
+
+async def packinfo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inspect metadata and details of a sticker and its pack."""
+    replied = update.message.reply_to_message if update.message else None
+    if not replied or not replied.sticker:
+        await update.message.reply_text("⚠️ <b>Rᴇᴘʟʏ Tᴏ A Sᴛɪᴄᴋᴇʀ Tᴏ Vɪᴇᴡ Iᴛꜱ Pᴀᴄᴋ Iɴꜰᴏ!</b>", parse_mode="HTML")
+        return
+
+    src_sticker = replied.sticker
+    bot = context.bot
+
+    if not src_sticker.set_name:
+        await update.message.reply_text(
+            f"ℹ️ <b>Sᴛɪᴄᴋᴇʀ Iɴꜰᴏ:</b>\n\n"
+            f"🆔 <b>File ID:</b> <code>{src_sticker.file_id}</code>\n"
+            f"🎭 <b>Emoji:</b> {src_sticker.emoji or 'None'}\n"
+            f"📐 <b>Size:</b> {src_sticker.width}x{src_sticker.height}\n"
+            f"📦 <b>Pack:</b> Standalone sticker (No pack)",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        s_set = await bot.get_sticker_set(src_sticker.set_name)
+        fmt = "Animated" if s_set.is_animated else ("Video" if s_set.is_video else "Static")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👉 Add This Sticker Pack", url=f"https://t.me/addstickers/{s_set.name}")]
+        ])
+        text = (
+            f"📦 <b>Sᴛɪᴄᴋᴇʀ Pᴀᴄᴋ Iɴꜰᴏ:</b>\n\n"
+            f"🏷️ <b>Title:</b> <b>{html_lib.escape(s_set.title)}</b>\n"
+            f"🔗 <b>Short Name:</b> <code>{s_set.name}</code>\n"
+            f"🎨 <b>Format:</b> {fmt}\n"
+            f"🔢 <b>Total Stickers:</b> <code>{len(s_set.stickers)}</code>\n"
+            f"🎭 <b>Sticker Emoji:</b> {src_sticker.emoji or '✨'}"
+        )
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Could not fetch pack info: {e}")
+
+
+async def open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("🛡️ Run this in a group!")
+        return
+    if not (await _is_admin(update, context, user.id)):
+        await update.message.reply_text("🛡️ Only group admins can use /open.")
+        return
+    update_group(chat.id, economy_enabled=True)
+    await update.message.reply_text("✅ All Economy Commands Have Been Enabled In This Group.")
+
+
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    if not chat or chat.type == "private":
+        await update.message.reply_text("🛡️ Run this in a group!")
+        return
+    if not (await _is_admin(update, context, user.id)):
+        await update.message.reply_text("🛡️ Only group admins can use /close.")
+        return
+    update_group(chat.id, economy_enabled=False)
+    await update.message.reply_text("🚫 All Economy Commands Have Been Disabled In This Group.")
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "🍀 Tᴀᴘ Tʜᴇ Bᴜᴛᴛᴏɴ Bᴇʟᴏᴡ Tᴏ Gᴇᴛ Sᴏᴍᴇ Aᴍᴀᴢɪɴɢ Mɪᴋᴏ'S Gʀᴏᴜᴘ Mᴀɴᴀɢᴇᴍᴇɴᴛ Cᴏᴍᴍᴀɴᴅꜱ."
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📩 Cʟɪᴄᴋ Hᴇʀᴇ Fᴏʀ Cᴏᴍᴍᴀɴᴅ Lɪꜱᴛ", url="https://t.me/i_mikoo/9")]
+    ])
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def tr(update, context):
+    args = context.args or []
+    replied = update.message.reply_to_message if update.message else None
+
+    if not replied and not args:
+        await update.message.reply_text("🥀 Uꜱᴀɢᴇ: /tr <Rᴇᴘʟʏ> <Lᴀɴɢᴜᴀɢᴇ Nᴀᴍᴇ>")
+        return
+
+    text = None
+    target_lang = "english"
+
+    if replied:
+        text = replied.text or replied.caption
+        if args:
+            target_lang = " ".join(args).strip()
+    elif args:
+        if len(args) >= 2:
+            target_lang = args[0].strip()
+            text = " ".join(args[1:])
+        else:
+            await update.message.reply_text("🥀 Uꜱᴀɢᴇ: /tr <Rᴇᴘʟʏ> <Lᴀɴɢᴜᴀɢᴇ Nᴀᴍᴇ>")
+            return
+
+    if not text:
+        await update.message.reply_text("🥀 Uꜱᴀɢᴇ: /tr <Rᴇᴘʟʏ> <Lᴀɴɢᴜᴀɢᴇ Nᴀᴍᴇ>")
+        return
+
+    wait_msg = await update.message.reply_text("🌐 <i>Translating...</i>", parse_mode="HTML")
+    try:
+        translated, src_lang, tgt_lang = await ai_translate(text, target_lang)
+        result_text = f"Translated from {src_lang} to {tgt_lang}.\n\n{translated}"
+        await wait_msg.edit_text(result_text)
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Translation error: {e}")
+
+
+async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    from modules.utils.storage import get_all_users, get_featured_groups, save_featured_groups
+    data = get_all_users()
+    sorted_richest = sorted(data.items(), key=lambda x: x[1].get("balance", 0), reverse=True)
+    top_5_ids = [int(uid) for uid, _ in sorted_richest[:5]]
+
+    if user.id not in top_5_ids:
+        await update.message.reply_text("🚫 Oɴʟʏ Tᴏᴘ 5 Gʟᴏʙᴀʟ Rɪᴄʜᴇꜱᴛ Uꜱᴇʀꜱ Cᴀɴ Uꜱᴇ Tʜɪꜱ Cᴏᴍᴍᴀɴᴅ.")
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("💡 Usage: /setgroup <Group Name> | <https://t.me/your_group_link>")
+        return
+
+    raw = " ".join(args).strip()
+    if "|" in raw:
+        parts = raw.split("|", 1)
+        g_name = parts[0].strip()
+        g_link = parts[1].strip()
+    else:
+        g_name = user.first_name or "Top Group"
+        g_link = raw
+
+    if not g_link.startswith("http"):
+        g_link = f"https://t.me/{g_link.lstrip('@')}"
+
+    groups = [g for g in get_featured_groups() if g.get("user_id") != user.id]
+    groups.append({"name": g_name, "link": g_link, "user_id": user.id})
+    save_featured_groups(groups[:5])
+
+    await update.message.reply_text(
+        f"✅ <b>Featured Group Updated!</b>\n\n"
+        f"🏷️ Name: <b>{html_lib.escape(g_name)}</b>\n"
+        f"🔗 Link: {g_link}",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_addfriend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    target_id = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args:
+        try:
+            target_id = int(args[0].replace("@", ""))
+        except ValueError:
+            await update.message.reply_text("⚠️ Please provide a valid User ID or reply to a user's message.")
+            return
+
+    if not target_id:
+        await update.message.reply_text("🤝 <b>Usage:</b> <code>/addfriend &lt;user_id&gt;</code> or reply to a message with <code>/addfriend</code>", parse_mode="HTML")
+        return
+
+    from modules.social.social_manager import SocialManager
+    sm = SocialManager.get_instance()
+    ok, msg = sm.send_friend_request(user.id, target_id)
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_acceptfriend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    target_id = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args:
+        try:
+            target_id = int(args[0].replace("@", ""))
+        except ValueError:
+            await update.message.reply_text("⚠️ Please provide a valid User ID.")
+            return
+
+    if not target_id:
+        await update.message.reply_text("🤝 <b>Usage:</b> <code>/acceptfriend &lt;user_id&gt;</code> or reply to a message with <code>/acceptfriend</code>", parse_mode="HTML")
+        return
+
+    from modules.social.social_manager import SocialManager
+    sm = SocialManager.get_instance()
+    ok, msg = sm.accept_friend_request(user.id, target_id)
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_unfriend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    args = context.args or []
+    target_id = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args:
+        try:
+            target_id = int(args[0].replace("@", ""))
+        except ValueError:
+            await update.message.reply_text("⚠️ Please provide a valid User ID.")
+            return
+
+    if not target_id:
+        await update.message.reply_text("💔 <b>Usage:</b> <code>/unfriend &lt;user_id&gt;</code>", parse_mode="HTML")
+        return
+
+    from modules.social.social_manager import SocialManager
+    sm = SocialManager.get_instance()
+    ok, msg = sm.remove_friend(user.id, target_id)
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+async def cmd_friendlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    from modules.social.social_manager import SocialManager
+    sm = SocialManager.get_instance()
+    friends = sm.get_friends(user.id)
+    if not friends:
+        await update.message.reply_text("🤝 You have no registered friends yet. Add one with <code>/addfriend &lt;user_id&gt;</code>!", parse_mode="HTML")
+        return
+
+    lines = [f"🤝 <b>{html_lib.escape(user.first_name)}'s Friends ({len(friends)})</b>\n"]
+    for f in friends[:20]:
+        lines.append(f"• <b>{html_lib.escape(str(f['name']))}</b> (Lv.{f['level']}) — <code>{f['user_id']}</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_reportplayer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    args = context.args or []
+    target_id = None
+    reason_parts = list(args)
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_id = update.message.reply_to_message.from_user.id
+    elif args and args[0].lstrip("-").isdigit():
+        target_id = int(args[0])
+        reason_parts = args[1:]
+
+    if not target_id:
+        await update.message.reply_text("🚨 <b>Usage:</b> Reply to a user with <code>/reportplayer &lt;reason&gt;</code> or <code>/reportplayer &lt;user_id&gt; &lt;reason&gt;</code>", parse_mode="HTML")
+        return
+
+    reason = " ".join(reason_parts).strip() or "Cheating or rule violation"
+    from modules.social.social_manager import SocialManager
+    sm = SocialManager.get_instance()
+    ok, msg = sm.submit_report(user.id, target_id, chat.id if chat else None, reason)
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+HANDLERS = {
+    "addfriend": cmd_addfriend,
+    "acceptfriend": cmd_acceptfriend,
+    "unfriend": cmd_unfriend,
+    "friendlist": cmd_friendlist,
+    "myfriends": cmd_friendlist,
+    "reportplayer": cmd_reportplayer,
+    "crush": cmd_crush,
+    "love": cmd_love,
+    "look": cmd_look,
+    "brain": cmd_brain,
+    "stupid_meter": stupid_meter,
+    "murder": cmd_murder,
+    "slap": cmd_slap,
+    "punch": cmd_punch,
+    "bite": cmd_bite,
+    "kiss": cmd_kiss,
+    "hug": cmd_hug,
+    "couples": couples,
+    "friends": friends,
+    "addf": addf,
+    "tag": tag_cmd,
+    "t": tag_cmd,
+    "ctag": ctag,
+    "delf": delf,
+    "allf": allf,
+    "friend": friend,
+    "gift": gift,
+    "q": q_cmd,
+    "qc": q_cmd,
+    "cloudq": q_cmd,
+    "qcloud": q_cmd,
+    "calc": calc_cmd,
+    "c": calc_cmd,
+    "voice": voice,
+    "tr": tr,
+    "is_deleted": is_deleted_cmd,
+    "report": report_cmd,
+    "setemoji": setemoji,
+    "check": check_emoji,
+    "detail": detail,
+    "owner": owner_cmd,
+    "admins": admins_cmd,
+    "admin": admins_cmd,
+    "intro": intro,
+    "setintro": setintro,
+    "own": own,
+    "kang": own,
+    "clone": clone_pack,
+    "copypack": clone_pack,
+    "copy": clone_pack,
+    "delsticker": del_sticker,
+    "del": del_sticker,
+    "mypacks": mypacks_cmd,
+    "packs": mypacks_cmd,
+    "packlist": mypacks_cmd,
+    "stok": stok_cmd,
+    "toimg": stok_cmd,
+    "topng": stok_cmd,
+    "tosticker": tosticker_cmd,
+    "towebp": tosticker_cmd,
+    "packinfo": packinfo_cmd,
+    "stickerinfo": packinfo_cmd,
+    "open": open_cmd,
+    "close": close_cmd,
+    "help": help_cmd,
+    "setgroup": setgroup,
+    "ping": ping_cmd,
+}

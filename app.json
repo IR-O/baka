@@ -1,0 +1,44 @@
+{
+  "name": "Baka Gaming Bot",
+  "description": "Multi-feature Telegram Gaming Platform & AI Bot with Economy, Collectible Cards, Dungeon RPG, 27 Games, Clans, Pets, and Houses.",
+  "repository": "https://github.com/IR-O/baka",
+  "logo": "https://telegra.ph/file/0c9a75908b8b0e7747e92.jpg",
+  "keywords": ["telegram", "bot", "python", "gaming", "ai", "miko", "baka"],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "The numeric Telegram User ID of the Bot Owner",
+      "required": true
+    },
+    "OPENROUTER_API_KEY": {
+      "description": "OpenRouter API Key for AI Chatbot and Gaming Copilot (Optional)",
+      "required": false
+    },
+    "LOG_GROUP_ID": {
+      "description": "Log Group / Channel ID for bot logs (Optional)",
+      "required": false
+    },
+    "RAZORPAY_KEY_ID": {
+      "description": "Razorpay Key ID for payments (Optional)",
+      "required": false
+    },
+    "RAZORPAY_KEY_SECRET": {
+      "description": "Razorpay Key Secret for payments (Optional)",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
